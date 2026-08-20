@@ -1,11 +1,21 @@
 {
-  "name": "community-activity-lite",
+  "name": "community-activity-react",
   "version": "5.17.3",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js tests/simulator/*.test.js",
     "check:syntax": "node --check background.js && node --check liteScanner.js && node --check domScan.js && node --check sidepanel.js && node --check rosterSources.js && node --check observedAuthors.js && node --check memberArchive.js && node --check graphqlContracts.js && node --check diagnostics.js",
-    "check": "npm run check:syntax && npm test"
+    "check": "npm run check:syntax && npm test",
+    "build": "vite build && node scripts/copy-mv3-files.mjs",
+    "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.0",
+    "vite": "^8.2.2"
   }
 }
