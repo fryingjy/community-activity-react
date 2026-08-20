@@ -1,0 +1,10 @@
+# Scraped/exported member data never belongs in version control, even privately.
+exports/
+
+# Unrelated project nested in this folder — has its own separate repo.
+website/
+
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
