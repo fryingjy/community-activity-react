@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Community Activity",
-  "version": "5.17.3",
+  "version": "5.17.4",
   "description": "Scan an X Community roster for inactive members and export a CSV.",
   "minimum_chrome_version": "114",
   "permissions": ["cookies", "storage", "unlimitedStorage", "scripting", "sidePanel", "webRequest"],

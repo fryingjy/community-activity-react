@@ -1233,6 +1233,13 @@ async function analyzeRecentActivity(ctx) {
         ? "quota-paused"
         : "selected-window-in-progress",
     oldestSeenAt: ctx.active.oldestSeenAt || null,
+    // A resumed activity walk continues from its saved cursor, not from the
+    // newest page again - see timelineCollector.js's own comment - so its
+    // newest-side coverage can be meaningfully older than "now" once a scan
+    // spans an interruption. Surfaced explicitly rather than left implicit,
+    // so a reviewer isn't misled into reading "window complete" as "as fresh
+    // as this moment."
+    newestObservedAsOf: ctx.active.newestObservedAsOf || null,
   };
 }
 
@@ -1599,6 +1606,18 @@ async function finalizeResultsAndSave(ctx) {
           : `. This scan reached its page budget before the window closed; the next scan ` +
             `continues from its saved activity cursor.`)) +
     (currentRosterState.complete ? "" : ` This is a partial-roster result: ${friendlyStopReason(currentRosterState.reason)}.`) +
+    // A resumed activity walk cannot revisit the newest region it already
+    // passed before the interruption - see timelineCollector.js's own
+    // comment - so once that gap is more than a token few minutes, it is
+    // worth saying explicitly rather than let "window complete" read as "as
+    // fresh as this export."
+    (currentActivityState.newestObservedAsOf &&
+      Date.now() - new Date(currentActivityState.newestObservedAsOf).getTime() > 15 * 60 * 1000
+      ? ` This scan's activity coverage reflects posts as of ` +
+        `${new Date(currentActivityState.newestObservedAsOf).toLocaleString()}, not the current moment - ` +
+        `it resumed a walk interrupted earlier rather than starting from the newest post again; ` +
+        `a fresh scan will pick up anything posted since then.`
+      : "") +
     (currentDiagnostics?.activitySearchVerification
       ? ` Direct search confirmed ${currentDiagnostics.activitySearchVerification.checked.toLocaleString()} flagged member(s) this scan` +
         (currentDiagnostics.activitySearchVerification.remaining

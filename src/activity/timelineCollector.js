@@ -70,6 +70,18 @@ export async function fetchActiveAuthors(
   const seenTweetIds = new Set(
     canResume || canReuseComplete ? stored.seenTweetIds || [] : []
   );
+  // The moment this checkpoint's walk actually started - captured once, the
+  // first time a fresh walk begins from the true newest page, and carried
+  // forward verbatim across every resume rather than recomputed. A resumed
+  // walk continues from a saved mid-walk cursor, not from the newest page
+  // again, so anything posted between this timestamp and "now" sits in a
+  // region the walk structurally cannot revisit without restarting from
+  // scratch. `newestObservedAsOf` names that boundary explicitly instead of
+  // letting a scan silently imply its activity coverage is as fresh as the
+  // moment it was read, when a resume may mean it is actually hours older.
+  const newestObservedAsOf = canResume || canReuseComplete
+    ? (stored.newestObservedAsOf ? new Date(stored.newestObservedAsOf) : new Date(stored.updatedAt || Date.now()))
+    : new Date();
   const finalizeActivity = (windowComplete, backfillComplete, pages, oldestSeenAt, stopReason) => {
     active.observedAuthors = observed.toJSON();
     active.activityWindowComplete = windowComplete;
@@ -81,6 +93,7 @@ export async function fetchActiveAuthors(
     // concrete "reached July 18, target July 9, 9 days remaining" instead
     // of only a boolean complete/incomplete.
     active.oldestSeenAt = oldestSeenAt ? oldestSeenAt.toISOString() : null;
+    active.newestObservedAsOf = newestObservedAsOf.toISOString();
     active.stopReason = stopReason || null;
     return active;
   };
@@ -113,7 +126,9 @@ export async function fetchActiveAuthors(
     oldestSeenAt = stored.oldestSeenAt ? new Date(stored.oldestSeenAt) : null;
     log?.(
       `Resuming author backfill with ${active.size.toLocaleString()} active and ` +
-      `${observed.size.toLocaleString()} observed author(s).`
+      `${observed.size.toLocaleString()} observed author(s) - newest coverage is still as of ` +
+      `${newestObservedAsOf.toLocaleString()}, since a resumed walk continues from its saved ` +
+      `position rather than the newest page again.`
     );
   }
 
@@ -253,6 +268,7 @@ export async function fetchActiveAuthors(
         authors: active.toJSON(),
         observedAuthors: observed.toJSON(),
         seenTweetIds: [...seenTweetIds],
+        newestObservedAsOf: newestObservedAsOf.toISOString(),
         oldestSeenAt: oldestSeenAt ? oldestSeenAt.toISOString() : null,
         updatedAt: Date.now(),
       },

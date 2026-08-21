@@ -225,6 +225,169 @@ test("a transient 500 is retried and resolved correctly within one candidate's r
   }
 });
 
+test("a qualifying post behind a page of reposts is still found, not missed by only checking the first page", async () => {
+  // Real-validation finding: the search only ever checked one 20-result
+  // page. A member whose visible search results are entirely reposts on
+  // page 1 - with their one actual Community reply on page 2 - was
+  // incorrectly concluded inactive, because nothing paginated further.
+  const repostsPage = Array.from({ length: 20 }, (_, i) => ({
+    tweetId: `h-repost-${i}`, authorUserId: "9", authorUsername: "hank",
+    createdAtMs: IN_WINDOW - i * 1000, kind: "repost",
+  }));
+  const candidate = { username: "hank", user_id: "9" };
+  const server = createFakeXVerificationServer({
+    documentId: DOCUMENT_ID,
+    operation: OPERATION,
+    pageSize: 20,
+    postsByUsername: {
+      // Page 1 (positions 0-19): 20 reposts, no qualifying post - the old
+      // single-page implementation would have stopped here and concluded
+      // inactive. Page 2 (position 20): the real reply.
+      hank: [...repostsPage, { tweetId: "h-reply", authorUserId: "9", authorUsername: "hank", createdAtMs: IN_WINDOW, kind: "reply" }],
+    },
+  });
+  const env = installFakeXEnvironment(server);
+  try {
+    const result = await verifyMemberActivityViaSearch("1234567890", [candidate], {
+      sinceDate: SINCE,
+      ...noInjectedDelay(),
+    });
+    const entry = result.results.get(activitySearchCandidateIdentity(candidate));
+    assert.equal(entry.hasActivityInWindow, true,
+      "the qualifying reply on page 2 must be found, not missed by stopping at page 1's reposts");
+    assert.equal(server.requestCount, 2, "expected exactly one follow-up page, not more than needed");
+  } finally {
+    env.restore();
+  }
+});
+
+test("pagination stops once it pages past the requested window boundary, without needlessly exhausting the whole history", async () => {
+  // A candidate with nothing but reposts, whose oldest visible result has
+  // already aged past `sinceDate`, is proven inactive without needing to
+  // page all the way to the real end of their history.
+  const candidate = { username: "ivy", user_id: "10" };
+  const server = createFakeXVerificationServer({
+    documentId: DOCUMENT_ID,
+    operation: OPERATION,
+    pageSize: 5,
+    postsByUsername: {
+      // 3 pages of reposts; page 2's oldest result is already before SINCE,
+      // so the walk must stop there rather than continuing to page 3.
+      ivy: [
+        ...Array.from({ length: 5 }, (_, i) => ({ tweetId: `i1-${i}`, authorUserId: "10", authorUsername: "ivy", createdAtMs: IN_WINDOW - i * 1000, kind: "repost" })),
+        ...Array.from({ length: 5 }, (_, i) => ({ tweetId: `i2-${i}`, authorUserId: "10", authorUsername: "ivy", createdAtMs: i < 2 ? IN_WINDOW - 100000 : BEFORE_WINDOW - i * 1000, kind: "repost" })),
+        ...Array.from({ length: 5 }, (_, i) => ({ tweetId: `i3-${i}`, authorUserId: "10", authorUsername: "ivy", createdAtMs: BEFORE_WINDOW - 1000000 - i * 1000, kind: "repost" })),
+      ],
+    },
+  });
+  const env = installFakeXEnvironment(server);
+  try {
+    const result = await verifyMemberActivityViaSearch("1234567890", [candidate], {
+      sinceDate: SINCE,
+      ...noInjectedDelay(),
+    });
+    const entry = result.results.get(activitySearchCandidateIdentity(candidate));
+    assert.equal(entry.hasActivityInWindow, false);
+    assert.equal(server.requestCount, 2, "page 2 already crosses SINCE - a 3rd page is not needed to prove inactivity");
+  } finally {
+    env.restore();
+  }
+});
+
+test("a stale negative result is re-checked on a later scan; a stale positive result of the same age is not", async () => {
+  // Real-validation finding: both positive and negative results shared one
+  // 24-hour cache TTL. A negative result ("nothing found as of 10:00") only
+  // proves silence up to the moment it was checked - reusing it untouched
+  // at 18:00 the same day meant a member who posted at 14:00 stayed
+  // incorrectly "confirmed inactive" for the rest of that 24-hour window.
+  const activeCandidate = { username: "jack", user_id: "11" };
+  const inactiveCandidate = { username: "kate", user_id: "12" };
+  const server = createFakeXVerificationServer({
+    documentId: DOCUMENT_ID,
+    operation: OPERATION,
+    postsByUsername: {
+      jack: [{ tweetId: "j1", authorUserId: "11", authorUsername: "jack", createdAtMs: IN_WINDOW, kind: "post" }],
+      // kate: no entry - a genuine zero-result search.
+    },
+  });
+  const env = installFakeXEnvironment(server);
+  try {
+    const first = await verifyMemberActivityViaSearch("1234567890", [activeCandidate, inactiveCandidate], {
+      sinceDate: SINCE,
+      ...noInjectedDelay(),
+    });
+    assert.equal(first.checked, 2);
+
+    // Backdate both cache entries by 40 minutes - past the 30-minute
+    // negative-evidence freshness window, but nowhere near the 24-hour
+    // positive one.
+    const key = "activitySearchVerification:1234567890";
+    const stored = env.storage.get(key);
+    const backdated = Date.now() - 40 * 60 * 1000;
+    for (const entry of Object.values(stored.entries)) entry.checkedAt = backdated;
+    env.storage.set(key, stored);
+
+    const requestsBeforeRerun = server.requestCount;
+    const rerun = await verifyMemberActivityViaSearch("1234567890", [activeCandidate, inactiveCandidate], {
+      sinceDate: SINCE,
+      ...noInjectedDelay(),
+    });
+    assert.equal(rerun.checked, 1, "only the stale negative result should be re-checked");
+    assert.equal(server.requestCount, requestsBeforeRerun + 1);
+    assert.equal(
+      rerun.results.get(activitySearchCandidateIdentity(inactiveCandidate)).checkedAt > backdated,
+      true,
+      "the negative entry must have been refreshed"
+    );
+    assert.equal(
+      rerun.results.get(activitySearchCandidateIdentity(activeCandidate)).checkedAt,
+      backdated,
+      "the positive entry must still be the untouched, reused one"
+    );
+  } finally {
+    env.restore();
+  }
+});
+
+test("a cached result from before a username change is not reused for the new handle", async () => {
+  // Real-validation finding: the cache key is stable-ID-based (correctly -
+  // usernames change), but the actual X query is username-based
+  // ((from:<username>)). A rename means the query that produced a cached
+  // result no longer matches what would be queried today, so an old
+  // negative result must not be reused just because the stable ID matches.
+  const beforeRename = { username: "oldname", user_id: "13" };
+  const afterRename = { username: "newname", user_id: "13" };
+  const server = createFakeXVerificationServer({
+    documentId: DOCUMENT_ID,
+    operation: OPERATION,
+    postsByUsername: {
+      // oldname: no results (matches the original check).
+      // newname: has since posted under the new handle.
+      newname: [{ tweetId: "n1", authorUserId: "13", authorUsername: "newname", createdAtMs: IN_WINDOW, kind: "post" }],
+    },
+  });
+  const env = installFakeXEnvironment(server);
+  try {
+    const first = await verifyMemberActivityViaSearch("1234567890", [beforeRename], {
+      sinceDate: SINCE,
+      ...noInjectedDelay(),
+    });
+    assert.equal(first.results.get(activitySearchCandidateIdentity(beforeRename)).hasActivityInWindow, false);
+
+    // Same stable ID, new username - the roster now reports the rename.
+    const requestsBeforeRerun = server.requestCount;
+    const second = await verifyMemberActivityViaSearch("1234567890", [afterRename], {
+      sinceDate: SINCE,
+      ...noInjectedDelay(),
+    });
+    assert.equal(server.requestCount, requestsBeforeRerun + 1,
+      "the rename must trigger a real re-check, not reuse the old handle's cached result");
+    assert.equal(second.results.get(activitySearchCandidateIdentity(afterRename)).hasActivityInWindow, true);
+  } finally {
+    env.restore();
+  }
+});
+
 test("a permanent contract failure on one candidate stops the run and leaves later candidates unverified, with the failure surfaced", async () => {
   const grace = { username: "grace", user_id: "7" }; // never reached
   const gary = { username: "gary", user_id: "8" }; // fails permanently

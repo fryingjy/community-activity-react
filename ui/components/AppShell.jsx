@@ -2,7 +2,7 @@ import { toggleDashboardMode, openCommunityTab } from "../scanEngine.js";
 import { useState } from "react";
 import { OverviewIcon, ScanIcon, FlagIcon, ShieldIcon, StorageIcon } from "./icons.jsx";
 
-const VERSION = "5.17.3";
+const VERSION = "5.17.4";
 
 const NAV_ITEMS = [
   { key: "overview", label: "Overview", Icon: OverviewIcon },

@@ -5,12 +5,21 @@ import { DOCUMENT_IDS, TIMELINE_FEATURES } from "../api/operations.js";
 import { StoppedError } from "../core/errors.js";
 import { communityActivityKind, parseCommunityTimelinePage } from "./timelineParser.js";
 
-const ACTIVITY_SEARCH_VERIFICATION_SCHEMA = 1;
-// Not tied to a lookback window: a search answers "when did this account last
-// post here", which stays true regardless of which rolling window is selected
-// today. The cache only needs to be fresh enough that a very recent post could
-// not have been missed.
-const ACTIVITY_SEARCH_VERIFICATION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const ACTIVITY_SEARCH_VERIFICATION_SCHEMA = 2;
+// Positive evidence ("this account posted at time T") is a fact about the
+// past and does not expire - not tied to a lookback window, since a search
+// answers "when did this account last post here" regardless of which
+// rolling window is selected today. Negative evidence ("no qualifying post
+// found as of this check") only proves silence up to the moment it was
+// checked; applying the same day-long TTL to it let a stale "nothing found"
+// answer stand in for "still nothing" across a whole day of re-scans, even
+// after the member posted in the meantime - exactly the case direct
+// verification exists to catch, since it only runs on members the broader
+// crawl already flagged. Short enough that an ordinary same-day re-scan
+// always re-verifies; long enough to survive a normal resume/retry within
+// one scan session without re-spending a request on the same candidate.
+const POSITIVE_EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const NEGATIVE_EVIDENCE_MAX_AGE_MS = 30 * 60 * 1000;
 
 function activitySearchVerificationKey(communityId) {
   return `activitySearchVerification:${communityId}`;
@@ -29,7 +38,7 @@ export function activitySearchCandidateIdentity(candidate) {
 // Matches the live contract captured from x.com's own Community search UI on
 // 2026-07-31: `query` is exactly `(from:<username>)` — parentheses included —
 // with `timelineRankingMode: "Recency"` so the newest post sorts first.
-export function buildActivitySearchVariables(communityId, username) {
+export function buildActivitySearchVariables(communityId, username, cursor = null) {
   return {
     count: 20,
     query: `(from:${username})`,
@@ -46,6 +55,7 @@ export function buildActivitySearchVariables(communityId, username) {
     withQuickPromoteEligibilityTweetFields: false,
     withGrokTranslatedBio: false,
     includeProfessionalCategory: true,
+    ...(cursor ? { cursor } : {}),
   };
 }
 
@@ -61,6 +71,21 @@ export function latestCommunityPostAt(tweets) {
     if (!latest || createdAt > latest) latest = createdAt;
   }
   return latest;
+}
+
+// How far back a page of search results actually reaches, regardless of
+// tweet kind - a page of nothing but reposts still proves the search has
+// paged past a given point in time, which is what tells the pagination loop
+// below it is safe to stop instead of fetching another page it does not
+// need.
+function oldestResultAt(tweets) {
+  let oldest = null;
+  for (const tweet of tweets || []) {
+    const createdAt = tweet?.legacy?.created_at ? new Date(tweet.legacy.created_at) : null;
+    if (!createdAt || Number.isNaN(createdAt.getTime())) continue;
+    if (!oldest || createdAt < oldest) oldest = createdAt;
+  }
+  return oldest;
 }
 
 // The broad Community timeline/media/word-shard crawl that supplies
@@ -97,6 +122,14 @@ export async function verifyMemberActivityViaSearch(
     // sizes the run from that instead of guessing. See quotaPlanner.js for
     // why "unread" and "exhausted" are handled differently.
     maxCandidatesPerRun = 400,
+    // A page of nothing but reposts does not prove inactivity - the
+    // qualifying post could be one page further back. Most candidates
+    // resolve on the first page (a qualifying post, or a page old enough to
+    // have already crossed the requested window boundary); this bounds how
+    // far a single ambiguous candidate can page before its evidence still
+    // counts as inconclusive, so one hard-to-resolve account cannot consume
+    // an unbounded share of the run's shared quota.
+    maxPagesPerCandidate = 5,
     // Both default to the real pacing/backoff, so no production call site is
     // affected - see the identical seam on fetchCommunityMembersByCursor and
     // fetchActiveAuthors.
@@ -116,6 +149,22 @@ export async function verifyMemberActivityViaSearch(
     : {};
   const now = Date.now();
 
+  // A cached entry is only trustworthy for the exact question it actually
+  // answered: the account it searched (the query is username-based even
+  // though the cache key is stable-ID-based - a rename invalidates it, since
+  // a search for the old handle stops being the right query, and may not
+  // even resolve to the same account's posts any more) and, for a negative
+  // result, how recently it was checked (see NEGATIVE_EVIDENCE_MAX_AGE_MS
+  // above for why that can't share positive evidence's day-long TTL).
+  function entryIsReusable(entry, candidate) {
+    if (!entry?.checkedAt) return false;
+    if (String(entry.usernameAtCheck || "").toLowerCase() !== String(candidate?.username || "").toLowerCase()) {
+      return false;
+    }
+    const maxAge = entry.lastPostAt ? POSITIVE_EVIDENCE_MAX_AGE_MS : NEGATIVE_EVIDENCE_MAX_AGE_MS;
+    return now - entry.checkedAt <= maxAge;
+  }
+
   const seenIdentities = new Set();
   const pendingCandidates = [];
   for (const candidate of candidates || []) {
@@ -123,10 +172,7 @@ export async function verifyMemberActivityViaSearch(
     const identity = activitySearchCandidateIdentity(candidate);
     if (seenIdentities.has(identity)) continue;
     seenIdentities.add(identity);
-    const previous = entries[identity];
-    if (previous?.checkedAt && now - previous.checkedAt <= ACTIVITY_SEARCH_VERIFICATION_MAX_AGE_MS) {
-      continue;
-    }
+    if (entryIsReusable(entries[identity], candidate)) continue;
     pendingCandidates.push({ identity, candidate });
   }
 
@@ -149,26 +195,49 @@ export async function verifyMemberActivityViaSearch(
     for (const { identity, candidate } of pendingCandidates.slice(0, plan.processNow)) {
       if (signal?.aborted) throw new StoppedError();
       try {
-        const payload = await graphqlGet(
-          searchOperation.documentId,
-          searchOperation.operation,
-          buildActivitySearchVariables(communityId, candidate.username),
-          searchFeatures,
-          {
-            signal,
-            requestStats,
-            log,
-            limiter,
-            maxAttempts: 3,
-            clientTransactionId: searchOperation.clientTransactionId || null,
-            delayFn,
+        let cursor = null;
+        let lastPostAt = null;
+        let pagesChecked = 0;
+        // Page newest-to-oldest until one of three things actually proves
+        // the answer: a qualifying post/reply is found (ACTIVE - stop
+        // immediately, no need to page further back than the newest
+        // evidence); the page's oldest result has already aged past the
+        // window this scan cares about (INACTIVE, proven - anything further
+        // back cannot change that verdict); or X's own cursor ends
+        // (INACTIVE, proven exhaustively). Only the budget/error paths below
+        // leave the answer unresolved.
+        while (pagesChecked < maxPagesPerCandidate) {
+          const payload = await graphqlGet(
+            searchOperation.documentId,
+            searchOperation.operation,
+            buildActivitySearchVariables(communityId, candidate.username, cursor),
+            searchFeatures,
+            {
+              signal,
+              requestStats,
+              log,
+              limiter,
+              maxAttempts: 3,
+              clientTransactionId: searchOperation.clientTransactionId || null,
+              delayFn,
+            }
+          );
+          const page = parseCommunityTimelinePage(payload, "search");
+          pagesChecked++;
+          const pageLatest = latestCommunityPostAt(page.tweets);
+          if (pageLatest) {
+            lastPostAt = pageLatest;
+            break;
           }
-        );
-        const page = parseCommunityTimelinePage(payload, "search");
-        const lastPostAt = latestCommunityPostAt(page.tweets);
+          const oldestOnPage = oldestResultAt(page.tweets);
+          const boundaryReached = Boolean(sinceDate && oldestOnPage && oldestOnPage < sinceDate);
+          if (boundaryReached || !page.nextCursor) break;
+          cursor = page.nextCursor;
+        }
         entries[identity] = {
           checkedAt: Date.now(),
           lastPostAt: lastPostAt ? lastPostAt.toISOString() : null,
+          usernameAtCheck: candidate.username,
         };
         checked++;
         if (checked % 10 === 0) {
@@ -204,7 +273,12 @@ export async function verifyMemberActivityViaSearch(
     const identity = activitySearchCandidateIdentity(candidate);
     if (results.has(identity)) continue;
     const entry = entries[identity];
-    if (!entry) continue;
+    // A candidate this run didn't have quota to reach still has whatever
+    // entry was already cached - which entryIsReusable() above already
+    // judged too stale or username-mismatched to select for re-verification
+    // in the first place. Returning it here anyway would silently launder a
+    // rejected cache entry back in as this run's answer.
+    if (!entry || !entryIsReusable(entry, candidate)) continue;
     const lastPostAt = entry.lastPostAt ? new Date(entry.lastPostAt) : null;
     results.set(identity, {
       username: candidate.username,

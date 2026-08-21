@@ -183,6 +183,57 @@ test("activity collection interrupted mid-walk resumes to the exact same final r
   }
 });
 
+test("a resumed activity walk reports newestObservedAsOf from when it actually started, not from a later resume's fresh recompute", async () => {
+  // Real-validation finding: production's analyzeRecentActivity computes a
+  // fresh `until` from calendarActivityWindow() on every call, including a
+  // resume - simulated here by passing a later `until` on the second call,
+  // same as a scan reopened hours after the browser closed mid-walk would.
+  // A resumed walk continues from its saved mid-walk cursor, not from the
+  // newest page again, so it structurally cannot see anything posted in
+  // that gap - newestObservedAsOf must stay pinned to when the walk
+  // actually started, so a caller can say so honestly instead of silently
+  // implying the coverage is as fresh as the resumed call's own `until`.
+  const untilMs = Date.UTC(2026, 6, 30, 8, 0, 0);
+  const laterUntilMs = Date.UTC(2026, 6, 30, 20, 0, 0);
+  const sinceMs = untilMs - 30 * 24 * 60 * 60 * 1000;
+  const tweets = [];
+  for (let i = 0; i < 200; i++) {
+    tweets.push({
+      tweetId: `nt${i}`, authorUserId: `nu${i % 50}`, authorUsername: `nauthor_${i % 50}`,
+      createdAtMs: untilMs - i * 45000, kind: i % 4 === 0 ? "reply" : "post",
+    });
+  }
+  const activityOptions = { tweets, pageSize: 20, documentId: DOCUMENT_IDS.CommunityTweetsTimeline, operation: "CommunityTweetsTimeline" };
+
+  const controller = new AbortController();
+  const server = createFakeXActivityServer({ ...activityOptions, onRequest: (n) => { if (n === 3) controller.abort(); } });
+  const env = installFakeXEnvironment(server);
+  try {
+    const beforeFirstCall = Date.now();
+    await assert.rejects(
+      fetchActiveAuthors("6161616161", new Date(sinceMs), new Date(untilMs), {
+        maxPagesPerRun: 2000, signal: controller.signal, ...noInjectedDelay(),
+      }),
+      (error) => error.name === "StoppedError"
+    );
+    const afterFirstCall = Date.now();
+
+    const resumed = await fetchActiveAuthors("6161616161", new Date(sinceMs), new Date(laterUntilMs), {
+      maxPagesPerRun: 2000, ...noInjectedDelay(),
+    });
+
+    assert.equal(resumed.activityWindowComplete, true);
+    const resumedAsOfMs = new Date(resumed.newestObservedAsOf).getTime();
+    assert.ok(
+      resumedAsOfMs >= beforeFirstCall && resumedAsOfMs <= afterFirstCall,
+      `expected newestObservedAsOf (${resumed.newestObservedAsOf}) to be pinned to the original ` +
+      `call's wall-clock time, not recomputed on resume`
+    );
+  } finally {
+    env.restore();
+  }
+});
+
 test("direct verification interrupted mid-run resumes at the correct queue offset, never re-checking or skipping a candidate", async () => {
   const candidates = Array.from({ length: 12 }, (_, i) => ({ username: `vuser${i}`, user_id: String(300 + i) }));
   const verificationOptions = {

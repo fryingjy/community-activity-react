@@ -1,6 +1,86 @@
-# Community Activity 5.17.3
+# Community Activity 5.17.4
 
 [github.com/fryingjy/community-activity-react](https://github.com/fryingjy/community-activity-react)
+
+## 5.17.4 — direct verification's evidence could go stale, single-page, or username-blind
+
+An external architecture review of the scanner's direct-verification path
+(the final evidence path before a member is exported as
+`confirmed-inactive`) raised four correctness concerns. All four were
+verified directly against the real code and fake-server-tested before being
+called real, in keeping with this project's own standard - not accepted or
+implemented on the strength of the review alone.
+
+**Negative evidence shared positive evidence's 24-hour cache TTL.**
+`verifyMemberActivityViaSearch` cached "no qualifying post found" the same
+way it cached "found a post at time T" - but a fact about the past doesn't
+expire, while a negative result only proves silence up to the moment it was
+checked. A member checked at 10:00 who posted at 14:00 stayed cached as
+confirmed-inactive for the rest of that 24-hour window on every re-scan,
+because nothing distinguished "still true" evidence from "was true as of an
+hour I've since passed." Positive evidence keeps its 24-hour TTL; negative
+evidence now gets 30 minutes - long enough to survive a normal resume/retry
+within one scan session, short enough that an ordinary same-day re-scan
+always re-verifies.
+
+**The search only ever checked one page.** `buildActivitySearchVariables`
+requested 20 results and stopped there. A member whose visible results were
+entirely reposts on page 1 - with their one real Community reply on page 2 -
+was concluded inactive without the search ever looking far enough back to
+find it. The search now pages (bounded at 5 pages per candidate) until one
+of three things actually proves the answer: a qualifying post is found, the
+page's oldest result has already aged past the scan's window boundary, or
+X's own cursor ends. Quota accounting is unaffected - pagination spends more
+of the same shared, already-tracked `CommunityTweetSearchModuleQuery`
+bucket, which `quotaPlanner.js` already sizes future runs against.
+
+**A rename invalidated nothing.** The verification cache is keyed by stable
+user ID (correctly - usernames change), but the actual X query is
+username-based (`(from:<username>)`). A negative result cached under
+`id:123456` while the account was `@oldname` was silently reused after a
+rename to `@newname`, even though re-running the same query today would
+search a completely different handle. Cache entries now record
+`usernameAtCheck`; a mismatch against the candidate's current username
+forces a fresh check regardless of cache age. `ACTIVITY_SEARCH_VERIFICATION_SCHEMA`
+bumped `1 → 2` so an existing cache (lacking the field entirely) is rebuilt
+rather than silently treated as always-matching.
+
+**The fourth concern - an "immutable scan epoch" so a resumed activity walk
+can't silently drift its claimed cutoff forward - turned out to be more
+subtle than its proposed fix.** Reading `fetchActiveAuthors` closely: a
+resumed walk continues from its saved mid-walk cursor, not from the newest
+page again, and `activityWindowComplete` is gated entirely on reaching
+`sinceDate` from below - `untilDate` only filters individual tweets as
+they're fetched, so clamping it back to the checkpoint's original value
+(the obvious fix) changes nothing observable, because the resumed walk's
+pages are all structurally older than the original `until` regardless of
+what the variable says. The real gap: anything posted between the original
+scan starting and a later resume sits in a region a resumed walk cannot
+revisit without restarting from scratch - not a data-loss bug (the very
+next full scan starts fresh once the checkpoint completes and picks it up),
+but the system's own freshness claim was dishonest about it, silently
+implying "as fresh as now" when a resume could mean "as fresh as several
+hours ago." Fixed narrowly and safely: `newestObservedAsOf` is captured
+once, the first time a walk truly starts from the newest page, and carried
+forward verbatim across every resume rather than recomputed - `sidepanel`'s
+result summary now states the actual timestamp explicitly once it's more
+than 15 minutes stale, instead of leaving the gap implicit.
+
+Five new tests prove these directly against the real functions and fake
+servers (`verificationSimulator.test.js`, `interruptionSimulator.test.js`),
+each confirmed to fail against the pre-fix code before being confirmed to
+pass against the fix. 183 tests, all green.
+
+**Scope note, and what was deliberately not done here:** the review also
+proposed a much larger set of P1/P2 changes - a formal scan-epoch
+abstraction, an evidence ledger per member, contract-health metadata,
+adaptive candidate ordering, a Community Health layer, and more. Those are
+directionally reasonable but substantially larger, unvalidated changes; per
+this project's own standing practice (see 5.14.0 through 5.17.0's history),
+that scale of change needs a live Community validation pass before it's
+trusted, not a single review's say-so. This entry covers only the four
+concerns that were verified as real, reproducible bugs against the actual
+code.
 
 ## 5.17.3 — a retry-exhausted rate limit was cached as a terminal stop, replaying a stale roster for up to 6 hours
 
