@@ -1,5 +1,7 @@
 # Community Activity 5.17.3
 
+[github.com/fryingjy/community-activity-react](https://github.com/fryingjy/community-activity-react)
+
 ## 5.17.3 — a retry-exhausted rate limit was cached as a terminal stop, replaying a stale roster for up to 6 hours
 
 Found by reading `collectRoster.js`'s stop-reason handling directly, not from
