@@ -1,6 +1,7 @@
 import { Fragment } from "react";
 import { exportDiagnostics } from "../scanEngine.js";
 import { ScanLog } from "./ScanLog.jsx";
+import { useCountUp } from "../useCountUp.js";
 
 const STAGES = [
   { key: "roster", label: "Roster" },
@@ -28,6 +29,14 @@ function PhaseRail({ activeIndex }) {
 }
 
 export function ProgressPanel({ state }) {
+  // A live scan's counters can update many times a second; useCountUp's
+  // chase-tween (see its own header comment) turns that into a fast,
+  // continuous odometer roll instead of either a jarring snap-per-update
+  // or a replay-from-zero flicker.
+  const animatedFound = useCountUp(state.membersFound, 450);
+  const animatedRequests = useCountUp(state.requestsCount, 450);
+  const animatedCoverage = useCountUp(state.coveragePercent ?? 0, 450);
+
   if (!state.progressVisible) return null;
   return (
     <section className="card" aria-live="polite">
@@ -63,7 +72,7 @@ export function ProgressPanel({ state }) {
       <div className="stats">
         <div>
           <span>Discovered</span>
-          <strong className="tabular">{state.membersFound.toLocaleString()}</strong>
+          <strong className="tabular">{Math.round(animatedFound).toLocaleString()}</strong>
         </div>
         <div>
           <span>Community</span>
@@ -71,11 +80,11 @@ export function ProgressPanel({ state }) {
         </div>
         <div className={`is-coverage${state.coveragePercent != null && state.coveragePercent < 99.5 ? " partial" : ""}`}>
           <span>Coverage</span>
-          <strong className="tabular">{state.coveragePercent == null ? "—" : `${state.coveragePercent.toFixed(1)}%`}</strong>
+          <strong className="tabular">{state.coveragePercent == null ? "—" : `${animatedCoverage.toFixed(1)}%`}</strong>
         </div>
         <div>
           <span>Requests</span>
-          <strong className="tabular">{state.requestsCount.toLocaleString()}</strong>
+          <strong className="tabular">{Math.round(animatedRequests).toLocaleString()}</strong>
         </div>
       </div>
 

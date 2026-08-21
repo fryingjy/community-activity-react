@@ -186,6 +186,7 @@ code {
   display: flex;
   gap: 7px;
   align-items: baseline;
+  animation: brand-glitch 9s ease-in-out infinite;
 }
 .eyebrow span { color: var(--accent); }
 .app-status {
@@ -315,6 +316,20 @@ button.secondary { background: transparent; }
   outline-offset: 1px;
   box-shadow: 0 0 0 4px var(--accent-soft);
 }
+/* A drawn chevron (two gradient triangles, no image asset) replaces the
+   OS select arrow, so a dropdown reads as part of this instrument panel
+   instead of a stock form control dropped into it. */
+.field select, .table-toolbar select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-faint) 50%),
+    linear-gradient(135deg, var(--text-faint) 50%, transparent 50%);
+  background-position: calc(100% - 17px) center, calc(100% - 12px) center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 30px;
+}
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .rule-field {
   display: grid; gap: 5px;
@@ -330,7 +345,37 @@ button.secondary { background: transparent; }
   font-size: var(--step-0);
   cursor: pointer;
 }
-.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+/* A hand-drawn checkbox instead of the native control: appearance:none
+   suppresses the OS widget, the check mark is two rotated borders (no
+   image asset, no extra element), and the glow on :checked matches every
+   other "this is on" signal in the app (the running badge, the active nav
+   item, the active phase-rail node). */
+.check input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px; height: 18px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface-2);
+  display: inline-grid;
+  place-items: center;
+  transition: border-color 0.15s var(--ease-out), background 0.15s var(--ease-out), box-shadow 0.15s var(--ease-out);
+}
+.check input:hover { border-color: var(--accent); }
+.check input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.check input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px -2px var(--accent-glow);
+}
+.check input:checked::after {
+  content: "";
+  width: 5px; height: 9px;
+  border: solid var(--accent-contrast);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
 
 .actions { display: flex; gap: 8px; }
 .actions button { flex: 1; justify-content: center; }
@@ -515,12 +560,12 @@ small { font-size: var(--step--2); color: var(--text-faint); line-height: 1.5; }
   width: 34px; height: 34px;
   border-radius: 50%;
   display: grid; place-items: center;
-  font-family: var(--font-mono);
   color: var(--accent);
   background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   box-shadow: 0 0 16px -6px var(--accent-glow);
 }
+.result-icon svg { width: 17px; height: 17px; stroke: currentColor; stroke-width: 1.7; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .result-number { display: flex; align-items: baseline; gap: 7px; }
 .result-number strong { font-family: var(--font-mono); font-size: 32px; font-weight: 700; letter-spacing: -0.02em; color: var(--text); }
 .result-number span { font-size: var(--step--1); color: var(--text-muted); }
@@ -607,7 +652,7 @@ button.export-primary span, .export-grid button span { font-family: var(--font-m
   position: relative;
 }
 .nav-item:hover:not(:disabled) { transform: none; background: var(--surface-2); border-color: var(--border); box-shadow: none; }
-.nav-item i { font-style: normal; font-family: var(--font-mono); font-size: var(--step-0); }
+.nav-item svg { width: 15px; height: 15px; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 .nav-item.active {
   background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
@@ -665,6 +710,26 @@ button.export-primary span, .export-grid button span { font-family: var(--font-m
 
 .empty-state { text-align: left; }
 .empty-state p { color: var(--text-muted); max-width: 46ch; }
+
+/* A quiet sensor sweep instead of a blank "nothing here" state - static
+   rings/crosshair/blips are plain SVG (see icons.jsx's RadarSweep), the
+   rotating beam is a conic-gradient div layered underneath so the rotation
+   itself is one compositor-friendly transform, not a redrawn SVG. */
+.radar-hero { position: relative; width: 116px; height: 116px; margin: 2px auto 4px; }
+.radar-hero svg { position: relative; z-index: 1; width: 100%; height: 100%; display: block; }
+.radar-ring { fill: none; stroke: color-mix(in srgb, var(--accent) 30%, var(--border)); stroke-width: 1; }
+.radar-axis { stroke: color-mix(in srgb, var(--accent) 16%, var(--border)); stroke-width: 1; }
+.radar-core { fill: var(--accent); filter: drop-shadow(0 0 6px var(--accent-glow)); animation: pulse 1.7s ease-in-out infinite; }
+.radar-blip { fill: var(--accent); opacity: 0; animation: radar-blip 3.6s ease-in-out infinite; }
+.radar-blip-b { animation-delay: 1.15s; }
+.radar-blip-c { animation-delay: 2.35s; }
+.radar-sweep {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, color-mix(in srgb, var(--accent) 60%, transparent), transparent 55deg, transparent 360deg);
+  animation: radar-spin 4s linear infinite;
+}
 
 .report-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .report-stats > div {
@@ -831,10 +896,33 @@ button.export-primary span, .export-grid button span { font-family: var(--font-m
   0%, 100% { background-position: 0 0, 0 0, 0 0; }
   50% { background-position: -4% 3%, 0 0, 0 0; }
 }
+@keyframes radar-spin { to { transform: rotate(360deg); } }
+@keyframes radar-blip { 0%, 100% { opacity: 0; } 45%, 62% { opacity: 1; } }
+/* A rare (roughly once every 9s), brief RGB-split flicker on the brand
+   wordmark - the one purely decorative "signature" touch, kept short and
+   infrequent enough to read as a wink at the aesthetic rather than a
+   distraction from a page someone is trying to read. */
+@keyframes brand-glitch {
+  0%, 96%, 100% { text-shadow: none; transform: none; }
+  97% { text-shadow: -2px 0 var(--accent), 2px 0 #4dd8ff; transform: translateX(-0.5px); }
+  98% { text-shadow: 2px 0 var(--accent), -2px 0 #4dd8ff; transform: translateX(0.5px); }
+  99% { text-shadow: none; transform: none; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* View Transitions (see App.jsx's changeView) - a soft cross-fade + drift
+   between sections instead of the platform default hard cut. Scoped to the
+   root snapshot only, so it plays once per navigation, not per element. */
+@media not (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.28s; animation-timing-function: var(--ease-out); }
+  ::view-transition-old(root) { animation-name: view-exit; }
+  ::view-transition-new(root) { animation-name: view-enter; }
+}
+@keyframes view-exit { to { opacity: 0; transform: translateY(-6px); } }
+@keyframes view-enter { from { opacity: 0; transform: translateY(6px); } }
 
 @media (prefers-contrast: more) {
   :root { --border: var(--border-strong); }

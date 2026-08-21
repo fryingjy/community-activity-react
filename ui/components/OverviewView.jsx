@@ -1,4 +1,6 @@
 import { ResumePanel } from "./ResumePanel.jsx";
+import { RadarSweep } from "./icons.jsx";
+import { useCountUp } from "../useCountUp.js";
 
 // Real evidence-tier distribution, not an invented risk score: every flagged
 // row already carries activityVerification from the classification pipeline
@@ -23,12 +25,18 @@ export function OverviewView({ state, onStartScan }) {
   const hasResults = state.results.length > 0 || state.resultsPanelVisible;
   const hasEverScanned = hasResults || state.progressVisible || state.resumeJob;
 
+  const animatedMembers = useCountUp(state.expectedMembers || state.membersFound);
+  const animatedFlagged = useCountUp(state.results.length);
+  const animatedConfirmed = useCountUp(breakdown[0].count);
+  const animatedCoverage = useCountUp(state.coveragePercent ?? 0);
+
   return (
     <div className="view">
       <ResumePanel job={state.resumeJob} />
 
       {!hasEverScanned && (
         <section className="card empty-state">
+          <RadarSweep />
           <span className="kicker">Overview</span>
           <h2>No scan yet</h2>
           <p>Point this at an X Community to find members with zero posts or replies in a chosen window - confirmed with a direct search, not just inferred from a broad crawl.</p>
@@ -54,19 +62,19 @@ export function OverviewView({ state, onStartScan }) {
 
           <div className="report-stats">
             <div>
-              <strong className="tabular">{state.expectedMembers?.toLocaleString() || state.membersFound.toLocaleString()}</strong>
+              <strong className="tabular">{Math.round(animatedMembers).toLocaleString()}</strong>
               <span>Members</span>
             </div>
             <div>
-              <strong className="tabular">{state.results.length.toLocaleString()}</strong>
+              <strong className="tabular">{Math.round(animatedFlagged).toLocaleString()}</strong>
               <span>Flagged</span>
             </div>
             <div>
-              <strong className="tabular">{breakdown[0].count.toLocaleString()}</strong>
+              <strong className="tabular">{Math.round(animatedConfirmed).toLocaleString()}</strong>
               <span>Confirmed</span>
             </div>
             <div className={state.coveragePercent != null && state.coveragePercent < 99.5 ? "is-coverage partial" : "is-coverage"}>
-              <strong className="tabular">{state.coveragePercent == null ? "—" : `${state.coveragePercent.toFixed(1)}%`}</strong>
+              <strong className="tabular">{state.coveragePercent == null ? "—" : `${animatedCoverage.toFixed(1)}%`}</strong>
               <span>Coverage</span>
             </div>
           </div>

@@ -1,10 +1,11 @@
 import { exportPrivateCsv, exportPrivateText } from "../scanEngine.js";
+import { ShieldIcon } from "./icons.jsx";
 
 export function PrivatePanel({ state }) {
   if (!state.privatePanelVisible) return null;
   return (
     <section className="card result-card">
-      <div className="result-icon" aria-hidden="true">⌁</div>
+      <div className="result-icon" aria-hidden="true"><ShieldIcon /></div>
       <span className="kicker">Privacy review</span>
       <div className="result-number">
         <strong className="tabular">{state.privateAccounts.length.toLocaleString()}</strong>

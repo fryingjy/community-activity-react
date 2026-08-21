@@ -1,14 +1,15 @@
 import { toggleDashboardMode, openCommunityTab } from "../scanEngine.js";
 import { useState } from "react";
+import { OverviewIcon, ScanIcon, FlagIcon, ShieldIcon, StorageIcon } from "./icons.jsx";
 
 const VERSION = "5.17.3";
 
 const NAV_ITEMS = [
-  { key: "overview", label: "Overview", glyph: "⌂" },
-  { key: "new-scan", label: "New scan", glyph: "◎" },
-  { key: "flagged", label: "Flagged members", glyph: "⚑" },
-  { key: "privacy", label: "Privacy review", glyph: "⌁" },
-  { key: "storage", label: "Storage", glyph: "⛁" },
+  { key: "overview", label: "Overview", Icon: OverviewIcon },
+  { key: "new-scan", label: "New scan", Icon: ScanIcon },
+  { key: "flagged", label: "Flagged members", Icon: FlagIcon },
+  { key: "privacy", label: "Privacy review", Icon: ShieldIcon },
+  { key: "storage", label: "Storage", Icon: StorageIcon },
 ];
 
 export function AppShell({ state, activeView, onChangeView, children }) {
@@ -65,7 +66,7 @@ export function AppShell({ state, activeView, onChangeView, children }) {
                   className={`nav-item${activeView === item.key ? " active" : ""}`}
                   onClick={() => onChangeView(item.key)}
                 >
-                  <i aria-hidden="true">{item.glyph}</i>
+                  <item.Icon />
                   <span>{item.label}</span>
                   {item.key === "flagged" && flaggedCount > 0 && (
                     <em className="nav-badge tabular">{flaggedCount.toLocaleString()}</em>
