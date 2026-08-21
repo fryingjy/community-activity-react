@@ -2,6 +2,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+// The Phase 3 UI rewrite (see ui/scanEngine.js's own header comment) moved
+// every DOM-string-matchable control out of sidepanel.html/js/css and into
+// React components under ui/. This concatenates the view layer the same way
+// rosterDomainSource() below concatenates the roster domain, so tests that
+// used to grep sidepanel.html for a control's id can instead grep for the
+// React binding (value=/checked=/onClick=) that replaced it.
+async function uiViewSource() {
+  const { readdir } = await import("node:fs/promises");
+  let combined = await readFile(new URL("../ui/App.jsx", import.meta.url), "utf8") + "\n";
+  const base = new URL("../ui/components/", import.meta.url);
+  for (const name of await readdir(base)) {
+    if (name.endsWith(".jsx")) combined += await readFile(new URL(name, base), "utf8") + "\n";
+  }
+  return combined;
+}
+
 test("lite manifest uses MV3 least privilege and stable Chrome APIs", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
@@ -18,9 +34,9 @@ test("lite manifest uses MV3 least privilege and stable Chrome APIs", async () =
 
 test("every declared permission has a verified, current call site - see PRIVACY.md's audit", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
-  const [domScanSource, sidepanelSource, graphqlClientSource] = await Promise.all([
+  const [domScanSource, engineSource, graphqlClientSource] = await Promise.all([
     readFile(new URL("../domScan.js", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
     readFile(new URL("../src/api/graphqlClient.js", import.meta.url), "utf8"),
   ]);
   assert.deepEqual(
@@ -30,7 +46,7 @@ test("every declared permission has a verified, current call site - see PRIVACY.
   );
   assert.match(graphqlClientSource, /chrome\.cookies\.get/);
   assert.ok(
-    domScanSource.includes("chrome.scripting.executeScript") || sidepanelSource.includes("chrome.scripting.executeScript"),
+    domScanSource.includes("chrome.scripting.executeScript") || engineSource.includes("chrome.scripting.executeScript"),
     "scripting permission has no remaining call site"
   );
   assert.match(domScanSource, /chrome\.webRequest\.onBeforeSendHeaders\.addListener/);
@@ -41,18 +57,34 @@ test("every declared permission has a verified, current call site - see PRIVACY.
 });
 
 test("side panel exposes only essential scan and CSV controls", async () => {
-  const html = await readFile(new URL("../sidepanel.html", import.meta.url), "utf8");
-  for (const marker of ["communityId", "lookbackDays", "inactiveRule", "timelineBackfill", "focusLock", "startBtn", "stopBtn", "modeToggleBtn", "communityTabBtn", "exportBtn", "exportDiagnosticsBtn", "privatePanel", "privateValue", "exportPrivateBtn", "exportPrivateTextBtn", "aria-live=\"polite\""]) {
-    assert.match(html, new RegExp(marker));
-  }
-  assert.doesNotMatch(html, /minPosts|Minimum posts/);
+  const ui = await uiViewSource();
+  // No element carries an id in the React views, so each control is
+  // addressed by the state binding or handler that replaced its id-based
+  // hook (value=/checked= for inputs, onClick= for buttons).
+  assert.match(ui, /value=\{state\.communityId\}/);
+  assert.match(ui, /value=\{String\(state\.lookbackDays\)\}/);
+  assert.match(ui, /Inactive when/);
+  assert.match(ui, /checked=\{state\.timelineBackfill\}/);
+  assert.match(ui, /checked=\{state\.focusLock\}/);
+  assert.match(ui, /type="submit"/);
+  assert.match(ui, /onClick=\{stopScan\}/);
+  assert.match(ui, /onClick=\{handleToggleMode\}/);
+  assert.match(ui, /onClick=\{handleOpenCommunityTab\}/);
+  assert.match(ui, /onClick=\{exportAllFlagged\}/);
+  assert.match(ui, /onClick=\{\(\) => void exportDiagnostics\(\)\}/);
+  assert.match(ui, /privatePanelVisible/);
+  assert.match(ui, /private accounts found/);
+  assert.match(ui, /onClick=\{exportPrivateCsv\}/);
+  assert.match(ui, /onClick=\{exportPrivateText\}/);
+  assert.match(ui, /aria-live="polite"/);
+  assert.doesNotMatch(ui, /minPosts|Minimum posts/);
   for (const removed of ["officialApiToken", "diagnosticRecorderToggle", "operationRecoveryStatus", "exportFormat", "deepRescue", "useApifyProvider", "apifyToken", "apifyMaxCharge"]) {
-    assert.doesNotMatch(html, new RegExp(removed));
+    assert.doesNotMatch(ui, new RegExp(removed));
   }
 });
 
 test("private-account export becomes durable before activity analysis", async () => {
-  const source = await readFile(new URL("../sidepanel.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8");
   const rosterPrivateIndex = source.indexOf(
     "currentPrivateAccounts = ctx.members.filter((member) => member.protected === true)"
   );
@@ -65,8 +97,8 @@ test("private-account export becomes durable before activity analysis", async ()
 });
 
 test("the primary activity scan is not stopped by a small fixed page cap - the first real-validation finding", async () => {
-  const [panelSource, collectorSource] = await Promise.all([
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+  const [engineSource, collectorSource] = await Promise.all([
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
     readFile(new URL("../src/activity/timelineCollector.js", import.meta.url), "utf8"),
   ]);
   // A live scan on an active-enough Community previously stopped after 250
@@ -74,10 +106,10 @@ test("the primary activity scan is not stopped by a small fixed page cap - the f
   // 30-day window, reported 0 flagged members every run, and told the
   // operator to press Start again indefinitely. The primary activity call
   // must not pass a small fixed maxPagesPerRun anymore.
-  const analyzeIndex = panelSource.indexOf("async function analyzeRecentActivity");
-  const nextFunctionIndex = panelSource.indexOf("\nfunction activityCoverageProgressLabel");
+  const analyzeIndex = engineSource.indexOf("async function analyzeRecentActivity");
+  const nextFunctionIndex = engineSource.indexOf("\nasync function archiveTimelineMediaAndSearch");
   assert.ok(analyzeIndex >= 0 && nextFunctionIndex > analyzeIndex);
-  const analyzeBody = panelSource.slice(analyzeIndex, nextFunctionIndex);
+  const analyzeBody = engineSource.slice(analyzeIndex, nextFunctionIndex);
   // Checks for the actual property assignment, not the bare word - which
   // also appears in this function's own explanatory comment about why
   // there isn't one.
@@ -89,30 +121,29 @@ test("the primary activity scan is not stopped by a small fixed page cap - the f
   assert.match(collectorSource, /stopReason = "quota-paused"/);
   // The archival/backfill pass is intentionally different - conservative
   // and fine to spread across scans - and must keep its own budget.
-  assert.match(panelSource, /maxPagesPerRun: AUTHOR_BACKFILL_PAGES_PER_RUN/);
+  assert.match(engineSource, /maxPagesPerRun: AUTHOR_BACKFILL_PAGES_PER_RUN/);
 });
 
 test("side panel uses structured scan events and accessible motion", async () => {
-  const [html, script, css, background] = await Promise.all([
-    readFile(new URL("../sidepanel.html", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.css", import.meta.url), "utf8"),
+  const [ui, css, script, background] = await Promise.all([
+    uiViewSource(),
+    readFile(new URL("../ui/theme.css", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
     readFile(new URL("../background.js", import.meta.url), "utf8"),
   ]);
-  assert.match(html, /class="phase-rail"/);
-  assert.match(html, /class="scan-log"/);
-  assert.match(html, /role="log"/);
-  assert.doesNotMatch(html, /<pre id="log"/);
+  assert.match(ui, /className="phase-rail"/);
+  assert.match(ui, /className="scan-log"/);
+  assert.match(ui, /role="log"/);
   assert.match(script, /professionalLogMessage/);
   assert.match(script, /Live roster connection established/);
   assert.match(script, /buildDiagnosticReport/);
   assert.match(script, /archiving-timeline/);
   assert.match(script, /will not physically scroll/);
-  assert.match(script, /phaseValue\.dataset\.stage/);
+  assert.match(ui, /data-stage=\{state\.phaseStage\}/);
   assert.match(script, /stage === "activity"/);
   assert.match(script, /collectSafeBrowserDiagnostics/);
   assert.match(script, /dashboardMode/);
-  assert.match(script, /Open Lite panel/);
+  assert.match(ui, /Open Lite panel/);
   assert.match(script, /focusCommunityTab/);
   assert.match(script, /dashboardTab/);
   assert.match(background, /chrome\.tabs\.create/);
@@ -122,13 +153,18 @@ test("side panel uses structured scan events and accessible motion", async () =>
   assert.match(script, /acquireScanLease/);
   assert.doesNotMatch(background, /chrome\.windows\.create/);
   assert.match(css, /data-mode="dashboard"/);
-  assert.match(css, /main:has\(\.progress-card\[hidden\]\)/);
+  // The vanilla version needed a `main:has(.progress-card[hidden])` layout
+  // hack because hiding a section only ever toggled its `hidden` attribute.
+  // ProgressPanel now conditionally unmounts instead (returns null when not
+  // visible - see ProgressPanel.jsx), so there is nothing left for a :has()
+  // selector to key off; its absence here is the correct state, not a gap.
+  assert.doesNotMatch(css, /:has\(/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /--ease-out/);
 });
 
 test("panel typography stays on real font weights and a legible floor", async () => {
-  const css = await readFile(new URL("../sidepanel.css", import.meta.url), "utf8");
+  const css = await readFile(new URL("../ui/theme.css", import.meta.url), "utf8");
   // Static system faces cannot render 520/650/720/750, so two labels asking for
   // different phantom weights render identically and the hierarchy is lost.
   const weights = [...css.matchAll(/font-weight:\s*(\d{3})/g)].map((match) => Number(match[1]));
@@ -151,13 +187,22 @@ test("panel typography stays on real font weights and a legible floor", async ()
 });
 
 test("the scan log appends entries instead of rebuilding the list", async () => {
-  const script = await readFile(new URL("../sidepanel.js", import.meta.url), "utf8");
-  assert.match(script, /function appendLogEntry/);
-  assert.match(script, /pinnedToBottom/);
-  // Rebuilding all retained rows per event re-ran every entrance animation and
-  // threw away the reader's scroll position.
-  assert.doesNotMatch(script, /logEl\.replaceChildren\(\);/);
-  assert.match(script, /coverageValue/);
+  const [script, component] = await Promise.all([
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
+    readFile(new URL("../ui/components/ScanLog.jsx", import.meta.url), "utf8"),
+  ]);
+  // React's keyed reconciliation replaces the hand-rolled appendLogEntry()/
+  // pinnedToBottom DOM-diffing the vanilla version needed - see ScanLog.jsx's
+  // own header comment for why. What still has to hold: every entry needs a
+  // stable, unique key (a real incrementing id, not array index - or React
+  // re-animates/misorders unrelated rows), and scroll position must stay
+  // pinned to the bottom unless the reader scrolled up to read something.
+  assert.match(script, /let nextLogEntryId = 1;/);
+  assert.match(script, /id: nextLogEntryId\+\+/);
+  assert.match(component, /key=\{entry\.id\}/);
+  assert.match(component, /pinnedRef/);
+  assert.match(component, /el\.scrollTop = el\.scrollHeight/);
+  assert.match(script, /coveragePercent/);
 });
 
 test("DOM collection sends deltas instead of cloning the full roster per pass", async () => {
@@ -194,10 +239,11 @@ async function rosterDomainSource() {
 }
 
 test("cursor mode discovers the live operation and checkpoints every page", async () => {
-  const [domSource, scannerSource, panelHtmlForSeek] = await Promise.all([
+  const [domSource, scannerSource, setupFormSource, engineSource] = await Promise.all([
     readFile(new URL("../domScan.js", import.meta.url), "utf8"),
     rosterDomainSource(),
-    readFile(new URL("../sidepanel.html", import.meta.url), "utf8"),
+    readFile(new URL("../ui/components/SetupForm.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
   ]);
   assert.match(domSource, /membersSliceTimeline_Query/);
   assert.match(domSource, /performance\.getEntriesByType\("resource"\)/);
@@ -264,8 +310,11 @@ test("cursor mode discovers the live operation and checkpoints every page", asyn
     scannerSource,
     /reason === "seek-resume-exhausted";\s*\n\s*const terminal/
   );
-  assert.match(panelHtmlForSeek, /id="seekResume"/);
-  assert.doesNotMatch(panelHtmlForSeek, /id="seekResume"[^>]*checked/);
+  // The checkbox itself carries no id in the React form - it is addressed by
+  // its checked= binding, and defaults off through the store's own initial
+  // state rather than a hardcoded `checked` attribute.
+  assert.match(setupFormSource, /checked=\{state\.seekResume\}/);
+  assert.match(engineSource, /seekResume: false,/);
   assert.match(scannerSource, /CommunitiesMembersAllQuery/);
   assert.match(scannerSource, /checkpointScope/);
   assert.match(scannerSource, /CommunityMemberRelationshipTypeahead/);
@@ -275,14 +324,14 @@ test("cursor mode discovers the live operation and checkpoints every page", asyn
 });
 
 test("the scan runs its nine stages through ScanCoordinator, in order, with per-step timing recorded", async () => {
-  const [panelSource, coordinatorSource] = await Promise.all([
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+  const [engineSource, coordinatorSource] = await Promise.all([
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
     readFile(new URL("../src/core/scanCoordinator.js", import.meta.url), "utf8"),
   ]);
-  assert.match(panelSource, /new ScanCoordinator\(SCAN_STEPS\)/);
-  assert.match(panelSource, /await coordinator\.run\(ctx,/);
-  assert.match(panelSource, /requestStats\.steps/);
-  const stepsIndex = panelSource.indexOf("const SCAN_STEPS = [");
+  assert.match(engineSource, /new ScanCoordinator\(SCAN_STEPS\)/);
+  assert.match(engineSource, /await coordinator\.run\(ctx,/);
+  assert.match(engineSource, /requestStats\.steps/);
+  const stepsIndex = engineSource.indexOf("const SCAN_STEPS = [");
   assert.ok(stepsIndex >= 0);
   const order = [
     "discover-community",
@@ -297,7 +346,7 @@ test("the scan runs its nine stages through ScanCoordinator, in order, with per-
   ];
   let cursor = stepsIndex;
   for (const name of order) {
-    const found = panelSource.indexOf(`"${name}"`, cursor);
+    const found = engineSource.indexOf(`"${name}"`, cursor);
     assert.ok(found > cursor, `expected step "${name}" to appear in order after position ${cursor}`);
     cursor = found;
   }
@@ -310,111 +359,121 @@ test("the scan runs its nine stages through ScanCoordinator, in order, with per-
   // must leave a "running" trace, not be indistinguishable from a step that
   // was never reached at all.
   assert.match(coordinatorSource, /onStepStart\?\.\(step\.name, ctx\)/);
-  assert.match(panelSource, /onStepStart: \(name\) => \{/);
-  assert.match(panelSource, /status: "running"/);
+  assert.match(engineSource, /onStepStart: \(name\) => \{/);
+  assert.match(engineSource, /status: "running"/);
   // Every stage's resumePolicy is a claim checked against its own real side
   // effects (see SCAN_STEPS' own comment), not copied from a template -
   // pinned here so a future step addition can't silently ship without one.
   for (const name of order) {
     assert.match(
-      panelSource,
+      engineSource,
       new RegExp(`name: "${name}", resumePolicy: "(checkpoint-resumable|idempotent-rerun)"`)
     );
   }
 });
 
 test("resuming a saved scan job requires matching settings, not just the Community", async () => {
-  const panelSource = await readFile(new URL("../sidepanel.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8");
   // A job saved for a 90-day lookback must never be silently restored as
   // though it answered today's 30-day selection - see jobIdentity.js.
-  assert.match(panelSource, /isJobResumable\(\s*previousJob/);
-  // Both the save path and the resume-match path must read the live form
-  // settings, not a separately-tracked (and driftable) copy of them.
-  const settingsFieldsPattern = /lookbackDays: Number\.parseInt\(lookbackDaysEl\.value, 10\) \|\| 30,\s*\n\s*seekResume: seekResumeEl\.checked,\s*\n\s*timelineBackfill: timelineBackfillEl\.checked,/g;
-  const occurrences = panelSource.match(settingsFieldsPattern) || [];
-  assert.equal(occurrences.length, 2, "expected the settings snapshot in both saveScanJob and the resume-match check");
-  assert.match(panelSource, /const SCAN_JOB_SCHEMA = 3;/);
+  assert.match(source, /isJobResumable\(\s*previousJob,\s*\{ communityId, lookbackDays, seekResume, timelineBackfill \},\s*SCAN_JOB_SCHEMA\s*\)/);
+  // Both the save path (saveScanJob) and the resume-match path (init) must
+  // read live settings through the same single scanSettingsSnapshot()
+  // function, not two separately-tracked (and driftable) copies of it.
+  const snapshotDefinitions = source.match(/function scanSettingsSnapshot\(\)/g) || [];
+  assert.equal(snapshotDefinitions.length, 1, "scanSettingsSnapshot must be a single shared source of truth");
+  assert.match(source, /const settings = scanSettingsSnapshot\(\);/);
+  assert.match(source, /const SCAN_JOB_SCHEMA = 3;/);
 });
 
 test("Clear saved data is a distinct action from Discard resume, confirmed before running, and gated while a scan is active", async () => {
-  const [html, panelSource] = await Promise.all([
-    readFile(new URL("../sidepanel.html", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+  const [storagePanelSource, engineSource] = await Promise.all([
+    readFile(new URL("../ui/components/StoragePanel.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
   ]);
-  assert.match(html, /id="clearCommunityBtn"/);
-  assert.match(html, /id="clearAllDataBtn"/);
+  assert.match(storagePanelSource, /onClick=\{handleClearCommunity\}/);
+  assert.match(storagePanelSource, /onClick=\{handleClearAll\}/);
   // The copy must state the distinction explicitly - see PRIVACY.md and the
   // completion plan's own finding that a user could otherwise believe
   // Discard resume deletes checkpoints it deliberately leaves in place.
-  assert.match(html, /separate from <strong>Discard resume<\/strong>/);
-  assert.match(panelSource, /computeCommunityStorageKeys\(allEntries, communityId\)/);
-  assert.match(panelSource, /await chrome\.storage\.local\.clear\(\)/);
+  assert.match(storagePanelSource, /separate from\{" "\}\s*<strong>Discard resume<\/strong>/);
+  assert.match(engineSource, /computeCommunityStorageKeys\(allEntries, communityId\)/);
+  assert.match(engineSource, /await chrome\.storage\.local\.clear\(\)/);
   // Both destructive actions require an explicit confirmation before running.
-  assert.match(panelSource, /clearCommunityBtn\.addEventListener\("click", async \(\) => \{\s*\n\s*const communityId[\s\S]{0,300}confirm\(/);
-  assert.match(panelSource, /clearAllDataBtn\.addEventListener\("click", async \(\) => \{\s*\n\s*const confirmed = confirm\(/);
+  assert.equal((storagePanelSource.match(/const confirmed = confirm\(/g) || []).length, 2,
+    "expected a confirm() gate on both clear actions");
   // Mid-scan, clearing storage could remove a checkpoint the running scan is
-  // reading from or about to write to.
-  assert.match(panelSource, /clearCommunityBtn\.disabled = true;\s*\n\s*clearAllDataBtn\.disabled = true;/);
+  // reading from or about to write to - gated by the same busy flag every
+  // other storage-mutating control respects.
+  assert.match(engineSource, /clearCommunityEnabled: currentCommunityHasData && !getState\(\)\.busy/);
+  assert.match(engineSource, /clearAllEnabled: summary\.length > 0 && !getState\(\)\.busy/);
+  assert.match(storagePanelSource, /disabled=\{!state\.clearCommunityEnabled\}/);
+  assert.match(storagePanelSource, /disabled=\{!state\.clearAllEnabled\}/);
 });
 
 test("the supplemental archive's status is shown separately from the inactivity result, never blocking or implying it", async () => {
-  const [html, panelSource] = await Promise.all([
-    readFile(new URL("../sidepanel.html", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+  const [flaggedViewSource, engineSource] = await Promise.all([
+    readFile(new URL("../ui/components/FlaggedMembersView.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
   ]);
-  assert.match(html, /id="archiveStatusPanel"/);
-  assert.match(html, /Separate from the inactivity result above/);
+  assert.match(flaggedViewSource, /archive-status/);
+  assert.match(flaggedViewSource, /Separate from the flagged list above/);
   // The old resultSummary sentence blending timeline-archive status into the
   // same paragraph as the inactivity verdict must be gone, not duplicated.
-  assert.doesNotMatch(panelSource, /Timeline archive: \$\{ctx\.timelineArchiveState/);
-  assert.match(panelSource, /function renderArchiveStatus\(ctx\)/);
-  assert.match(panelSource, /renderArchiveStatus\(ctx\);/);
+  assert.doesNotMatch(engineSource, /Timeline archive: \$\{ctx\.timelineArchiveState/);
+  assert.match(engineSource, /function renderArchiveStatus\(ctx\)/);
+  assert.match(engineSource, /renderArchiveStatus\(ctx\);/);
   // Restoring a completed job from storage must show the same archive
   // status, not just the live in-scan path.
-  assert.match(panelSource, /renderArchiveStatus\(\{ timelineArchiveState: previousJob\.diagnostics\?\.timelineBackfill/);
+  assert.match(engineSource, /renderArchiveStatus\(\{ timelineArchiveState: previousJob\.diagnostics\?\.timelineBackfill/);
 });
 
 test("a plain-username export exists for the confirmed-inactive list, members only, gated the same as the CSV it pairs with", async () => {
-  const [html, panelSource, csvSource] = await Promise.all([
-    readFile(new URL("../sidepanel.html", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+  const [flaggedViewSource, engineSource, csvSource] = await Promise.all([
+    readFile(new URL("../ui/components/FlaggedMembersView.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
     readFile(new URL("../src/export/csv.js", import.meta.url), "utf8"),
   ]);
-  assert.match(html, /id="exportUsernamesBtn"/);
+  assert.match(flaggedViewSource, /onClick=\{exportUsernamesOnly\}/);
   assert.match(csvSource, /export function buildFlaggedUsernamesText/);
   // Excludes any non-"Member" role, not just "Moderator" by name, so an
   // unhardcoded role tier (e.g. an Admin tier) can't slip into a
   // members-only list.
   assert.match(csvSource, /row\.role && row\.role !== "Member"/);
-  assert.match(panelSource, /buildFlaggedUsernamesText\(confirmed\)/);
+  assert.match(engineSource, /buildFlaggedUsernamesText\(confirmed\)/);
   // Same confirmed-inactive row set and the same fail-closed invariant check
-  // as exportConfirmedBtn - the wrong list to act on directly is the broad
+  // as exportConfirmedOnly - the wrong list to act on directly is the broad
   // export, not this one.
-  assert.match(panelSource, /exportUsernamesBtn\.addEventListener\("click", \(\) => \{\s*\n\s*const confirmed = currentResults\.filter\(\(row\) => row\.activityVerification === "confirmed-inactive"\);\s*\n\s*if \(!confirmed\.length\) return;\s*\n\s*assertConfirmedOnlyRowsAreConfirmed\(confirmed\);/);
-  assert.match(panelSource, /exportUsernamesBtn\.disabled = !safeForAutomatedRemoval \|\| confirmedCount === 0;/);
+  assert.match(engineSource, /export function exportUsernamesOnly\(\) \{\s*\n\s*const confirmed = currentResults\.filter\(\(row\) => row\.activityVerification === "confirmed-inactive"\);\s*\n\s*if \(!confirmed\.length\) return;\s*\n\s*assertConfirmedOnlyRowsAreConfirmed\(confirmed\);/);
+  assert.match(flaggedViewSource, /disabled=\{!state\.exportUsernamesEnabled\}/);
 });
 
 test("export buttons are gated through the shared scan-completeness gate, not a local re-derivation", async () => {
-  const panelSource = await readFile(new URL("../sidepanel.js", import.meta.url), "utf8");
-  assert.match(panelSource, /summarizeScanCompleteness\(\{/);
-  assert.match(panelSource, /determineActionability\(currentCompleteness\)/);
+  const [engineSource, flaggedViewSource] = await Promise.all([
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
+    readFile(new URL("../ui/components/FlaggedMembersView.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(engineSource, /summarizeScanCompleteness\(\{/);
+  assert.match(engineSource, /determineActionability\(currentCompleteness\)/);
   // The two gates stay distinct on purpose: a bare "safe: true" sitting next
   // to caveats like roster-partial invites misreading, so the broad export
   // (mixed confirmed/unverified/unverifiable-protected rows, for review) and
   // the confirmed-only export (individually direct-search-verified rows,
   // closer to safe for automated action) each get their own named gate.
-  assert.match(panelSource, /exportBtn\.disabled = !reviewable \|\| rows\.length === 0/);
-  assert.match(panelSource, /exportConfirmedBtn\.disabled = !safeForAutomatedRemoval \|\| confirmedCount === 0/);
+  assert.match(engineSource, /exportEnabled: reviewable && rows\.length > 0/);
+  assert.match(engineSource, /exportConfirmedEnabled: safeForAutomatedRemoval && confirmedCount > 0/);
   // The gate must not silently start blocking a partial-roster export - that
   // remains a deliberate, surfaced caveat, not a hard stop. See
   // scanCompleteness.js: only an incomplete activity window blocks either gate.
-  assert.doesNotMatch(panelSource, /currentRosterState\.complete !== true \|\|/);
+  assert.doesNotMatch(engineSource, /currentRosterState\.complete !== true \|\|/);
+  assert.match(flaggedViewSource, /disabled=\{!state\.exportEnabled\}/);
+  assert.match(flaggedViewSource, /disabled=\{!state\.exportConfirmedEnabled\}/);
 });
 
 test("flagged members are confirmed with a direct from: search before export", async () => {
-  const [scannerSource, panelSource, csvSource, classificationSource] = await Promise.all([
+  const [scannerSource, engineSource, csvSource, classificationSource] = await Promise.all([
     readFile(new URL("../src/activity/directVerification.js", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
     readFile(new URL("../src/export/csv.js", import.meta.url), "utf8"),
     readFile(new URL("../src/activity/classification.js", import.meta.url), "utf8"),
   ]);
@@ -426,13 +485,13 @@ test("flagged members are confirmed with a direct from: search before export", a
   // Verification must run only against members already flagged, never the
   // full roster — the roster is tens of thousands of accounts and this is not
   // a request budget spent on everyone.
-  assert.match(panelSource, /verifySearchActivityForFlagged/);
-  assert.match(panelSource, /verifyMemberActivityViaSearch\(\s*ctx\.communityId,\s*currentResults/);
-  assert.doesNotMatch(panelSource, /verifyMemberActivityViaSearch\(\s*ctx\.communityId,\s*ctx\.members/);
+  assert.match(engineSource, /verifySearchActivityForFlagged/);
+  assert.match(engineSource, /verifyMemberActivityViaSearch\(\s*ctx\.communityId,\s*currentResults/);
+  assert.doesNotMatch(engineSource, /verifyMemberActivityViaSearch\(\s*ctx\.communityId,\s*ctx\.members/);
   // A confirmed-active member must be removed from the exported flagged list,
   // not merely annotated.
   assert.match(classificationSource, /result\?\.hasActivityInWindow/);
-  assert.match(panelSource, /classified\.cleared/);
+  assert.match(engineSource, /classified\.cleared/);
   assert.match(scannerSource, /activitySearchCandidateIdentity/);
   // A protected account returns the same empty search result whether it
   // genuinely posted nothing or is simply invisible to this session, so an
@@ -457,24 +516,24 @@ test("a separate export offers only the directly-confirmed subset, with a manual
   // The main export intentionally mixes confirmed, unverified, and
   // unverifiable-protected rows for review; a second, narrower export must
   // exist so that decision doesn't default to the unfiltered list.
-  const [html, panelSource] = await Promise.all([
-    readFile(new URL("../sidepanel.html", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+  const [flaggedViewSource, engineSource] = await Promise.all([
+    readFile(new URL("../ui/components/FlaggedMembersView.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
   ]);
-  assert.match(html, /id="exportConfirmedBtn"/);
-  assert.match(html, /unverifiable-protected/);
-  assert.match(html, /review both manually before acting on them/);
-  assert.match(panelSource, /activityVerification === "confirmed-inactive"/);
-  assert.match(panelSource, /confirmedCountEl\.textContent/);
+  assert.match(flaggedViewSource, /onClick=\{exportConfirmedOnly\}/);
+  assert.match(flaggedViewSource, /unverifiable-protected/);
+  assert.match(flaggedViewSource, /review both manually before acting on them/);
+  assert.match(engineSource, /activityVerification === "confirmed-inactive"/);
+  assert.match(flaggedViewSource, /state\.confirmedCount\.toLocaleString\(\)/);
   // The confirmed export must filter currentResults, not just relabel it —
   // an unverified row must never end up in this file.
   assert.match(
-    panelSource,
+    engineSource,
     /currentResults\.filter\(\(row\) => row\.activityVerification === "confirmed-inactive"\)/
   );
   // Fail closed rather than export: a thrown, machine-checkable invariant
   // backs the filter above instead of only trusting it silently.
-  assert.match(panelSource, /assertConfirmedOnlyRowsAreConfirmed\(confirmed\)/);
+  assert.match(engineSource, /assertConfirmedOnlyRowsAreConfirmed\(confirmed\)/);
 });
 
 test("the setup form names X's announced-but-unexecuted Communities shutdown, not silently", async () => {
@@ -485,9 +544,12 @@ test("the setup form names X's announced-but-unexecuted Communities shutdown, no
   // scanner - this only asserts the standing notice exists, not any
   // particular failure-detection behavior, since X's actual failure shape
   // can't be verified before it happens.
-  const html = await readFile(new URL("../sidepanel.html", import.meta.url), "utf8");
-  assert.match(html, /class="notice platform-status-notice"/);
-  assert.match(html, /2026-05-30/);
+  const [notice, setupForm] = await Promise.all([
+    readFile(new URL("../ui/components/PlatformStatusNotice.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../ui/components/SetupForm.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(notice, /2026-05-30/);
+  assert.match(setupForm, /<PlatformStatusNotice \/>/);
 });
 
 test("roster sources use a pluggable registry", async () => {
@@ -502,14 +564,15 @@ test("roster sources use a pluggable registry", async () => {
 });
 
 test("extension remains local and free of third-party roster services", async () => {
-  const [manifestText, panelHtml, panelSource, packageText, privacy] = await Promise.all([
+  const ui = await uiViewSource();
+  const [manifestText, engineSource, storeSource, packageText, privacy] = await Promise.all([
     readFile(new URL("../manifest.json", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.html", import.meta.url), "utf8"),
-    readFile(new URL("../sidepanel.js", import.meta.url), "utf8"),
+    readFile(new URL("../ui/scanEngine.js", import.meta.url), "utf8"),
+    readFile(new URL("../ui/store.js", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../PRIVACY.md", import.meta.url), "utf8"),
   ]);
-  for (const source of [manifestText, panelHtml, panelSource, packageText]) {
+  for (const source of [manifestText, ui, engineSource, storeSource, packageText]) {
     assert.doesNotMatch(source, /api\.apify|Apify|Xquik|prove:full-roster/i);
   }
   assert.match(privacy, /No scan data is sent\s+to another service/);

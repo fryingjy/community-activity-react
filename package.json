@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js tests/simulator/*.test.js",
-    "check:syntax": "node --check background.js && node --check liteScanner.js && node --check domScan.js && node --check sidepanel.js && node --check rosterSources.js && node --check observedAuthors.js && node --check memberArchive.js && node --check graphqlContracts.js && node --check diagnostics.js && node --check ui/store.js && node --check ui/scanEngine.js",
-    "check": "npm run check:syntax && npm test",
+    "check:syntax": "node --check background.js && node --check liteScanner.js && node --check domScan.js && node --check rosterSources.js && node --check observedAuthors.js && node --check memberArchive.js && node --check graphqlContracts.js && node --check diagnostics.js && node --check ui/store.js && node --check ui/scanEngine.js && node --check ui/useScanState.js",
+    "check": "npm run check:syntax && npm test && npm run build",
     "build": "vite build && node scripts/copy-mv3-files.mjs",
     "dev": "vite build --watch"
   },

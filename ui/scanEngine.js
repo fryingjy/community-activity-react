@@ -143,6 +143,7 @@ export const store = createStore({
   privatePanelVisible: false,
   privateRosterReady: false,
   privateAccounts: [],
+  privateNote: "",
 
   resultsPanelVisible: false,
   results: [],
@@ -252,10 +253,13 @@ function logLevel(message) {
   return "info";
 }
 
+let nextLogEntryId = 1;
+
 function log(message) {
   const polished = professionalLogMessage(message);
   if (!polished) return;
   const entry = {
+    id: nextLogEntryId++,
     message: polished,
     level: logLevel(polished),
     time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
