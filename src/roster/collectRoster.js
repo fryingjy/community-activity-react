@@ -376,7 +376,18 @@ export async function fetchCommunityMembersByCursor(
   // advertised count stays partial and carries its own stop reason, in keeping
   // with never claiming completeness the roster does not support.
   const complete = reason === "expected-count-reached" || reason === "cursor-ended";
-  const terminal = !complete && !["request-error", "page-safety-limit"].includes(reason);
+  // "rate-limited" and "request-error" are the same catch block (line ~240):
+  // graphqlGet's own retries (up to 6 attempts, real backoff) were already
+  // exhausted before either reason reaches here - neither says anything
+  // about the roster itself, only that this run couldn't get the next page
+  // right now. Marking either "terminal" makes partialTerminalCheckpoint
+  // (above) replay this same truncated member list for up to
+  // PARTIAL_CHECKPOINT_MAX_AGE_MS (6 hours) instead of resuming from
+  // meta.nextCursor - correct for a genuine stall (X repeating/withholding
+  // the cursor, or the walk re-entering already-collected ground), wrong for
+  // a rate limit that, per X's per-operation quota windows, typically clears
+  // in minutes, not hours.
+  const terminal = !complete && !["request-error", "rate-limited", "page-safety-limit"].includes(reason);
   meta = {
     ...meta,
     complete,

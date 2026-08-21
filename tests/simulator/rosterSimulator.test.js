@@ -193,6 +193,71 @@ test(
 );
 
 test(
+  "a rate limit that outlasts every retry is not cached as a terminal stop - the next scan resumes, it doesn't replay a stale partial roster",
+  async () => {
+    // Real-validation finding: exhausting graphqlGet's own retries (6
+    // attempts, real backoff) on a persistent 429 is not evidence the
+    // roster itself is exhausted the way X repeating/withholding a cursor
+    // is - only that this run couldn't get the next page right now. Before
+    // this fix, that stop was cached as `terminal: true`, which made every
+    // scan for the next 6 hours (PARTIAL_CHECKPOINT_MAX_AGE_MS) replay the
+    // same truncated member list instead of resuming, even though X's
+    // per-operation rate-limit windows clear in minutes.
+    const TOTAL = 50;
+    const servable = generateServableMembers(TOTAL, 0, 20 * 24 * 60 * 60 * 1000, Date.UTC(2025, 2, 1));
+    let faultActive = true;
+    const server = createFakeXRosterServer({
+      members: servable,
+      pageSize: 10,
+      chainPageCap: 20,
+      documentId: NATIVE_MEMBERS_ALL_OPERATION.documentId,
+      operation: NATIVE_MEMBERS_ALL_OPERATION.operation,
+      // Pages 1-3 succeed (30 members collected); from request 4 onward the
+      // rate limit never clears within this run, so graphqlGet's 4th-page
+      // attempt burns all 6 attempts and throws the exhausted-retries error.
+      injectFault: (requestNumber) => (faultActive && requestNumber >= 4 ? "429" : null),
+    });
+    const env = installFakeXEnvironment(server);
+    const communityId = "5555555555";
+    const scope = "simulator-roster-rate-limit";
+    try {
+      const first = await fetchCommunityMembersByCursor(communityId, NATIVE_MEMBERS_ALL_OPERATION, {
+        expectedCount: TOTAL,
+        checkpointScope: scope,
+        maxPages: 2000,
+        ...noInjectedDelay(),
+      });
+      assert.equal(first.reason, "rate-limited");
+      assert.equal(first.complete, false);
+      assert.equal(first.members.length, 30);
+      assert.ok(first.error, "expected the exhausted-retries error to be surfaced, not swallowed");
+
+      const metaKey = `cursorRoster:${scope}:${communityId}:meta`;
+      assert.equal(env.storage.get(metaKey).terminal, false,
+        "a retry-exhausted rate limit must not be cached as a terminal stop");
+
+      // The rate limit clears; a later scan (still well inside the 6-hour
+      // partial-checkpoint window) must resume the cursor walk rather than
+      // replaying the cached 30 members untouched.
+      faultActive = false;
+      const requestsBeforeResume = server.requestCount;
+      const second = await fetchCommunityMembersByCursor(communityId, NATIVE_MEMBERS_ALL_OPERATION, {
+        expectedCount: TOTAL,
+        checkpointScope: scope,
+        maxPages: 2000,
+        ...noInjectedDelay(),
+      });
+      assert.ok(server.requestCount > requestsBeforeResume,
+        "expected the resumed walk to make real requests, not just replay the cached checkpoint");
+      assert.equal(second.resumed, true);
+      assertExactCoverage(second, servable);
+    } finally {
+      env.restore();
+    }
+  }
+);
+
+test(
   "a large synthetic Community (79,000 members, 500-page chain cap) reaches exact servable coverage",
   { timeout: 60000 },
   async () => {

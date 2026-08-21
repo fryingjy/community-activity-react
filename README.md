@@ -1,4 +1,34 @@
-# Community Activity 5.17.2
+# Community Activity 5.17.3
+
+## 5.17.3 — a retry-exhausted rate limit was cached as a terminal stop, replaying a stale roster for up to 6 hours
+
+Found by reading `collectRoster.js`'s stop-reason handling directly, not from
+a live-scan report: `graphqlGet` already retries a 429 up to 6 times with
+real backoff before giving up and throwing `error.code = "rate-limited"`.
+When `fetchCommunityMembersByCursor` caught that, it classified the stop as
+`terminal: true` — the same bucket as a genuine roster stall (X repeating or
+withholding the cursor). That made `partialTerminalCheckpoint` replay the
+same truncated member list, untouched, for up to
+`PARTIAL_CHECKPOINT_MAX_AGE_MS` (6 hours) on every subsequent scan, instead
+of resuming the cursor walk — even though X's per-operation rate-limit
+windows reset in minutes, not hours. `"request-error"` (the sibling reason
+from the exact same catch block) was already correctly excluded from
+`terminal`; `"rate-limited"` was an oversight, not a deliberate choice —
+nothing in the surrounding code explained keeping it terminal, and no test
+exercised the retry-exhausted path at all.
+
+Fixed by adding `"rate-limited"` to the same exclusion list `"request-error"`
+already had. `tests/simulator/rosterSimulator.test.js` gained a new
+end-to-end proof: a fake server serves three pages, then returns 429
+persistently until every one of `graphqlGet`'s retries is spent; the test
+asserts the saved checkpoint is `terminal: false`, then runs the same
+collector again against a since-recovered server and asserts it actually
+resumes the cursor walk (real new requests, `resumed: true`, full coverage)
+rather than replaying the cached partial roster. Confirmed the test catches
+the regression by reverting the fix locally and watching it fail before
+restoring it — not just that it passes.
+
+178 tests, all green.
 
 ## 5.17.2 — a plain-username export, members only, for the confirmed-inactive list
 
